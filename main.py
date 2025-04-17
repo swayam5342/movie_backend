@@ -4,6 +4,8 @@ from sqlalchemy import create_engine, Column, Integer, String, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 import requests
 import os
 from typing import Any
@@ -105,19 +107,23 @@ def get_rating(id: int, db: Session = Depends(get_db)):
 
 @app.post("/movies/")
 def add_movie(title: str, db: Session = Depends(get_db)):
-    existing_movie = db.query(Movie).filter(Movie.title == title).first()
+    existing_movie = db.query(Movie).filter(func.lower(Movie.title) == title.lower()).first()
     if existing_movie:
         return existing_movie
 
     movie_data = fetch_movie_details(title)
     if not movie_data:
         raise HTTPException(status_code=404, detail="Movie not found")
-
-    new_movie = Movie(**movie_data)
-    db.add(new_movie)
-    db.commit()
-    db.refresh(new_movie)
-    return new_movie
+    
+    try:
+        new_movie = Movie(**movie_data)
+        db.add(new_movie)
+        db.commit()
+        db.refresh(new_movie)
+        return new_movie
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Movie with this IMDb ID already exists.")
 
 @app.post("/imdb/movies/")
 def add_movie_imdb(imdb_id: str, db: Session = Depends(get_db)):
