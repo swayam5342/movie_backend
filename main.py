@@ -6,6 +6,9 @@ from sqlalchemy.orm import sessionmaker, Session
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func, desc, case, cast, Float
+from typing import Dict, List, Any
+import json
 import requests
 import os
 from typing import Any
@@ -104,6 +107,12 @@ def get_rating(id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Movie not found")
     return {"movie_id": id, "title": movie.title, "rating": movie.ratings}
 
+@app.get("/movies/{title}")
+def get_movie_title(title: str, db: Session = Depends(get_db)):
+    existing_movie = db.query(Movie).filter(func.lower(Movie.title) == title.lower()).first()
+    if existing_movie:
+        return existing_movie
+
 
 @app.post("/movies/")
 def add_movie(title: str, db: Session = Depends(get_db)):
@@ -161,3 +170,107 @@ def delete_movie(movie_id: int, db: Session = Depends(get_db)):
     db.delete(movie)
     db.commit()
     return {"message": "Movie deleted successfully", "id": movie_id}
+
+
+@app.get("/statistics/")
+def get_statistics(db: Session = Depends(get_db)):
+    """Get overall statistics about the movie collection"""
+    total_movies = db.query(func.count(Movie.id)).scalar()
+    watched_movies = db.query(func.count(Movie.id)).filter(Movie.watched == True).scalar()
+    unwatched_movies = total_movies - watched_movies
+    genres_data = []
+    all_genres = set()
+    movies = db.query(Movie).all()
+    for movie in movies:
+        if movie.genre: #type:ignore
+            genres = [g.strip() for g in movie.genre.split(',')]
+            all_genres.update(genres)
+    for genre in all_genres:
+        count = 0
+        for movie in movies:
+            if movie.genre and genre in movie.genre: #type:ignore
+                count += 1
+        genres_data.append({"name": genre, "count": count})
+    genres_data.sort(key=lambda x: x["count"], reverse=True)
+    movie_types = db.query(
+        Movie.type, 
+        func.count(Movie.id).label('count')
+    ).group_by(Movie.type).all()
+    
+    types_data = [{"name": t[0] if t[0] else "Unknown", "count": t[1]} for t in movie_types]
+    actors_data = []
+    all_actors = set()
+    for movie in movies:
+        if movie.actors: #type:ignore
+            actors = [a.strip() for a in movie.actors.split(',')]
+            all_actors.update(actors)
+    
+    for actor in all_actors:
+        count = 0
+        for movie in movies:
+            if movie.actors and actor in movie.actors: #type:ignore
+                count += 1
+        actors_data.append({"name": actor, "count": count})
+    
+    actors_data.sort(key=lambda x: x["count"], reverse=True)
+    top_actors = actors_data[:10]
+    ratings_data = {"Internet Movie Database": 0, "Rotten Tomatoes": 0, "Metacritic": 0}
+    ratings_count = {"Internet Movie Database": 0, "Rotten Tomatoes": 0, "Metacritic": 0}
+    
+    for movie in movies:
+        if movie.ratings: #type:ignore
+            try:
+                cleaned_ratings = movie.ratings.replace("'", "\"")
+                ratings = json.loads(cleaned_ratings)
+                
+                for rating in ratings:
+                    source = rating.get("Source")
+                    value = rating.get("Value")
+                    
+                    if source in ratings_data:
+                        if source == "Internet Movie Database":
+                            try:
+                                score = float(value.split('/')[0])
+                                ratings_data[source] += score  #type:ignore
+                                ratings_count[source] += 1
+                            except (ValueError, IndexError):
+                                pass
+                        elif source == "Rotten Tomatoes":
+                            try:
+                                score = float(value.replace('%', ''))
+                                ratings_data[source] += score  #type:ignore
+                                ratings_count[source] += 1
+                            except ValueError:
+                                pass
+                        elif source == "Metacritic":
+                            try:
+                                score = float(value.split('/')[0])
+                                ratings_data[source] += score  #type:ignore
+                                ratings_count[source] += 1
+                            except (ValueError, IndexError):
+                                pass
+            except json.JSONDecodeError:
+                continue
+    avg_ratings = {}
+    for source in ratings_data:
+        if ratings_count[source] > 0:
+            avg_ratings[source] = round(ratings_data[source] / ratings_count[source], 1)
+        else:
+            avg_ratings[source] = 0
+    
+    return {
+        "total_movies": total_movies,
+        "watched_movies": watched_movies,
+        "unwatched_movies": unwatched_movies,
+        "watched_percentage": round((watched_movies / total_movies * 100) if total_movies > 0 else 0, 1),
+        "genres": genres_data,
+        "types": types_data,
+        "top_actors": top_actors,
+        "avg_ratings": avg_ratings
+    }
+
+@app.get("/statistics/recent-activity/")
+def get_recent_activity(limit: int = 10, db: Session = Depends(get_db)):
+    """Get recently added or watched movies"""
+    recent_movies = db.query(Movie).order_by(desc(Movie.id)).limit(limit).all()
+    return recent_movies
